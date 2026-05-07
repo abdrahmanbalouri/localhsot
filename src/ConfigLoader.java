@@ -156,8 +156,7 @@ public class ConfigLoader {
             skipWhitespace();
             if (pos >= json.length())
                 return null;
-            char c = json.charAt(pos); 
-            System.out.print(c);          
+            char c = json.charAt(pos);
             if (c == '{')
                 return parseObject();
             if (c == '[')

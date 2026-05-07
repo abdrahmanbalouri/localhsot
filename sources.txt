@@ -3,6 +3,7 @@ src/ConfigLoader.java
 src/Main.java
 src/HttpHandler.java
 src/HttpRequest.java
+src/HttpParser.java
 src/FileHandler.java
 src/ErrorResponses.java
 src/CgiHandler.java

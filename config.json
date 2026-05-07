@@ -10,7 +10,12 @@
     "maxHeaderSize": 8192,
     "maxBodySize": 1048576,
     "errorPages": {
-      "404": "./error_pages/404.html"
+      "400": "./error_pages/400.html",
+      "403": "./error_pages/403.html",
+      "404": "./error_pages/404.html",
+      "405": "./error_pages/405.html",
+      "413": "./error_pages/413.html",
+      "500": "./error_pages/500.html"
     }
   },
   "vhosts": [
@@ -19,7 +24,12 @@
       "root": "./www",
       "allowDirectoryListing": true,
       "errorPages": {
-        "404": "../error_pages/404.html"
+        "400": "../error_pages/400.html",
+        "403": "../error_pages/403.html",
+        "404": "../error_pages/404.html",
+        "405": "../error_pages/405.html",
+        "413": "../error_pages/413.html",
+        "500": "../error_pages/500.html"
       },
       "routes": [
         {
@@ -66,7 +76,12 @@
       "root": "./www",
       "allowDirectoryListing": true,
       "errorPages": {
-        "404": "../error_pages/404.html"
+        "400": "../error_pages/400.html",
+        "403": "../error_pages/403.html",
+        "404": "../error_pages/404.html",
+        "405": "../error_pages/405.html",
+        "413": "../error_pages/413.html",
+        "500": "../error_pages/500.html"
       },
       "routes": [
         {
