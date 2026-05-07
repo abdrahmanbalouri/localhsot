@@ -1,0 +1,46 @@
+{
+  "server": {
+    "ports": [
+      8080,
+      8080
+    ],
+    "keepAliveTimeoutMs": 30000,
+    "sessionTimeoutSec": 1800,
+    "bufferSize": 8192,
+    "maxHeaderSize": 8192,
+    "maxBodySize": 1048576
+  },
+  "vhosts": [
+    {
+      "domain": "localhost",
+      "root": "./www",
+      "allowDirectoryListing": true,
+      "routes": [
+        {
+          "path": "/api",
+          "handler": "ApiHandler"
+        },
+        {
+          "path": "/cgi-bin",
+          "handler": "CgiHandler",
+          "cgiExtension": ".py"
+        },
+        {
+          "path": "/",
+          "handler": "FileHandler"
+        }
+      ]
+    },
+    {
+      "domain": "test.com",
+      "root": "./www",
+      "allowDirectoryListing": true,
+      "routes": [
+        {
+          "path": "/",
+          "handler": "FileHandler"
+        }
+      ]
+    }
+  ]
+}

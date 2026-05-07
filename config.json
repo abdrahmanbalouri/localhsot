@@ -1,0 +1,126 @@
+{
+  "server": {
+    "ports": [
+      8080,
+      5050
+    ],
+    "keepAliveTimeoutMs": 30000,
+    "sessionTimeoutSec": 1800,
+    "bufferSize": 8192,
+    "maxHeaderSize": 8192,
+    "maxBodySize": 1048576,
+    "errorPages": {
+      "404": "./error_pages/404.html"
+    }
+  },
+  "vhosts": [
+    {
+      "domain": "localhost",
+      "root": "./www",
+      "allowDirectoryListing": true,
+      "errorPages": {
+        "404": "../error_pages/404.html"
+      },
+      "routes": [
+        {
+          "path": "/api",
+          "handler": "ApiHandler",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/old",
+          "handler": "FileHandler",
+          "redirectTo": "/"
+        },
+        {
+          "path": "/cgi-bin",
+          "handler": "CgiHandler",
+          "cgiExtension": ".py",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/readonly",
+          "handler": "FileHandler",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/",
+          "handler": "FileHandler",
+          "methods": [
+            "GET",
+            "POST",
+            "DELETE"
+          ]
+        }
+      ]
+    },
+    {
+      "domain": "127.0.0.1",
+      "root": "./www",
+      "allowDirectoryListing": true,
+      "errorPages": {
+        "404": "../error_pages/404.html"
+      },
+      "routes": [
+        {
+          "path": "/api",
+          "handler": "ApiHandler",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/old",
+          "handler": "FileHandler",
+          "redirectTo": "/"
+        },
+        {
+          "path": "/cgi-bin",
+          "handler": "CgiHandler",
+          "cgiExtension": ".py",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/readonly",
+          "handler": "FileHandler",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/",
+          "handler": "FileHandler",
+          "methods": [
+            "GET",
+            "POST",
+            "DELETE"
+          ]
+        }
+      ]
+    },
+    {
+      "domain": "test.com",
+      "root": "./www",
+      "allowDirectoryListing": false,
+      "routes": [
+        {
+          "path": "/",
+          "handler": "FileHandler",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    }
+  ]
+}
