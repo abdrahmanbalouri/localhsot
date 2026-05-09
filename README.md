@@ -133,6 +133,8 @@ curl -X POST -d "hello world" http://127.0.0.1:8080/upload/test.txt
 # Download uploaded file
 curl http://127.0.0.1:8080/upload/test.txt
 
+curl  -H "Host: localhost" http://127.0.0.1:8080/
+
 # Delete
 curl -X DELETE http://127.0.0.1:8080/upload/test.txt
 

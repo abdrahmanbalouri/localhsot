@@ -203,6 +203,7 @@ public class Server {
         c.headers.clear();
         for (int i = 1; i < lines.length; i++) {
             int colon = lines[i].indexOf(':');
+              System.out.println("Header line: " + lines[i]);
             if (colon > 0) c.headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim());
         }
 
