@@ -5,8 +5,6 @@ import java.nio.channels.*;
 import java.nio.charset.*;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.*;
-
 public class Server {
     public static class Route {
         String path;
@@ -28,6 +26,7 @@ public class Server {
     static class Connection {
         ByteBuffer buf = ByteBuffer.allocate(8192);
         ByteArrayOutputStream data = new ByteArrayOutputStream();
+        List<VirtualServer> possibleServers = new ArrayList<>();
         VirtualServer server; Route route;
         String method, path, queryString, version;
         Map<String, String> headers = new LinkedHashMap<>();
@@ -93,22 +92,24 @@ public class Server {
 
     public void start() throws IOException {
         selector = Selector.open();
-        Set<Integer> usedPorts = new HashSet<>();
+        Map<Integer, List<VirtualServer>> portMap = new LinkedHashMap<>();
         for (VirtualServer vs : servers) {
             for (int port : vs.ports) {
-                if (!usedPorts.add(port)) {
-                    System.err.println("Warning: duplicate port " + port + " skipped");
-                    continue;
-                }
-                try {
-                    ServerSocketChannel ssc = ServerSocketChannel.open();
-                    ssc.configureBlocking(false);
-                    ssc.bind(new InetSocketAddress(vs.host, port));
-                    ssc.register(selector, SelectionKey.OP_ACCEPT, vs);
-                    System.out.println("Listening on " + vs.host + ":" + port + " (" + vs.serverName + ")");
-                } catch (Exception e) {
-                    System.err.println("Failed to bind " + vs.host + ":" + port + " - " + e.getMessage());
-                }
+                portMap.computeIfAbsent(port, k -> new ArrayList<>()).add(vs);
+            }
+        }
+
+        for (Map.Entry<Integer, List<VirtualServer>> entry : portMap.entrySet()) {
+            int port = entry.getKey();
+            List<VirtualServer> vsList = entry.getValue();
+            try {
+                ServerSocketChannel ssc = ServerSocketChannel.open();
+                ssc.configureBlocking(false);
+                ssc.bind(new InetSocketAddress(port));
+                ssc.register(selector, SelectionKey.OP_ACCEPT, vsList);
+                System.out.println("Listening on port " + port + " for " + vsList.size() + " virtual servers: " + vsList.stream().map(vs -> vs.serverName.isEmpty() ? vs.host : vs.serverName).toList());
+            } catch (Exception e) {
+                System.err.println("Failed to bind port " + port + " - " + e.getMessage());
             }
         }
 
@@ -116,6 +117,7 @@ public class Server {
             try {
                 selector.select(1000);
                 for (SelectionKey key : selector.selectedKeys()) {
+                    System.out.println(key);
                     try {
                         if (key.isAcceptable()) handleAccept(key);
                         else if (key.isReadable()) handleRead(key);
@@ -137,14 +139,16 @@ public class Server {
                 System.err.println("Event loop error: " + e.getMessage());
             }
         }
-    }
+    }   
 
     private void handleAccept(SelectionKey key) throws IOException {
         ServerSocketChannel ssc = (ServerSocketChannel) key.channel();
         SocketChannel sc = ssc.accept();
         sc.configureBlocking(false);
         Connection c = new Connection();
-        c.server = (VirtualServer) key.attachment();
+        @SuppressWarnings("unchecked")
+        List<VirtualServer> vsList = (List<VirtualServer>) key.attachment();
+        c.possibleServers = vsList;
         sc.register(selector, SelectionKey.OP_READ, c);
     }
 
@@ -245,6 +249,15 @@ public class Server {
 
     private void process(Connection c) {
         if (c.parseError) { sendErrorNow(c, 400); return; }
+        String hostHeader = c.headers.get("host");
+        if (hostHeader != null && hostHeader.contains(":")) {
+            hostHeader = hostHeader.split(":", 2)[0];
+        }
+        String finalHost = hostHeader != null ? hostHeader.trim() : "";
+        c.server = c.possibleServers.stream()
+            .filter(vs -> vs.serverName.equalsIgnoreCase(finalHost))
+            .findFirst()
+            .orElse(c.possibleServers.get(0));
         c.route = router.match(c.server, c.path);
         if (c.route == null) { sendErrorNow(c, 404); return; }
         if (!c.route.methods.contains(c.method)) {

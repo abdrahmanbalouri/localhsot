@@ -41,7 +41,7 @@
       ]
     },{
       "host": "127.0.0.1",
-      "ports": [8085],
+      "ports": [8080,8081],
       "server_name": "jjjjj",
       "error_pages": {
         "400": "error_pages/400.html",
