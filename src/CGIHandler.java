@@ -6,6 +6,12 @@ public class CGIHandler {
 
     public static byte[] execute(String scriptPath, String method,
             Map<String, String> headers, byte[] body, String queryString) throws IOException {
+
+        File scriptFile = new File(scriptPath);
+        if (!scriptFile.exists() || !scriptFile.isFile()) {
+
+            throw new FileNotFoundException("CGI script not found: " + scriptPath);
+        }
         ProcessBuilder pb = new ProcessBuilder("python3", scriptPath);
         Map<String, String> env = pb.environment();
         env.put("REQUEST_METHOD", method);
@@ -22,7 +28,11 @@ public class CGIHandler {
         pb.redirectError(ProcessBuilder.Redirect.INHERIT);
 
         Process p = pb.start();
-        if (body != null && body.length > 0) p.getOutputStream().write(body);
+        if (body != null && body.length > 0) {
+            p.getOutputStream().write(body);
+
+        }
+        ;
         p.getOutputStream().close();
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -33,14 +43,20 @@ public class CGIHandler {
             while (System.currentTimeMillis() < deadline) {
                 if (is.available() > 0) {
                     int n = is.read(buf);
-                    if (n == -1) break;
+                    if (n == -1)
+                        break;
                     out.write(buf, 0, n);
                 } else {
-                    try { p.exitValue(); break; } catch (IllegalThreadStateException e) {}
+                    try {
+                        p.exitValue();
+                        break;
+                    } catch (IllegalThreadStateException e) {
+                    }
                     Thread.sleep(5);
                 }
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+        }
         p.destroyForcibly();
         return out.toByteArray();
     }

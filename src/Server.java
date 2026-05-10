@@ -107,7 +107,6 @@ public class Server {
                 ssc.configureBlocking(false);
                 ssc.bind(new InetSocketAddress(port));
                 ssc.register(selector, SelectionKey.OP_ACCEPT, vsList);
-                System.out.println("Listening on port " + port + " for " + vsList.size() + " virtual servers: " + vsList.stream().map(vs -> vs.serverName.isEmpty() ? vs.host : vs.serverName).toList());
             } catch (Exception e) {
                 System.err.println("Failed to bind port " + port + " - " + e.getMessage());
             }
@@ -117,7 +116,6 @@ public class Server {
             try {
                 selector.select(1000);
                 for (SelectionKey key : selector.selectedKeys()) {
-                    System.out.println(key);
                     try {
                         if (key.isAcceptable()) handleAccept(key);
                         else if (key.isReadable()) handleRead(key);
@@ -203,7 +201,6 @@ public class Server {
         c.headers.clear();
         for (int i = 1; i < lines.length; i++) {
             int colon = lines[i].indexOf(':');
-              System.out.println("Header line: " + lines[i]);
             if (colon > 0) c.headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim());
         }
 
@@ -338,7 +335,7 @@ public class Server {
     }
 
     private void runCGI(Connection c) {
-        try {
+        try {    
             byte[] out = CGIHandler.execute(resolvePath(c), c.method, c.headers, c.body, c.queryString);
             String outStr = new String(out, StandardCharsets.ISO_8859_1);
             int sep = outStr.indexOf("\r\n\r\n");
@@ -360,7 +357,10 @@ public class Server {
                 }
                 c.resBody = Arrays.copyOfRange(out, hdrLen, out.length);
             } else c.resBody = out;
-        } catch (Exception e) { sendErrorNow(c, 500); }
+        } catch (Exception e) { 
+              if (e instanceof FileNotFoundException) sendErrorNow(c, 404);
+              else  
+            sendErrorNow(c, 500); }
     }
 
     private void serveFile(Connection c) {
@@ -403,6 +403,7 @@ public class Server {
         Path root = Paths.get(c.route.root).normalize().toAbsolutePath();
         Path resolved = root.resolve("./" + rel).normalize();
         if (!resolved.startsWith(root)) resolved = root;
+
         return resolved.toString();
     }
 

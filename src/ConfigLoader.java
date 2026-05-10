@@ -4,7 +4,6 @@ import java.nio.file.*;
 public class ConfigLoader {
     public static Map<String, Object> parse(String path) throws Exception {
         String content = Files.readString(Paths.get(path));
-        System.out.println("Config content: " + content.trim());
         return (Map<String, Object>) new Parser(content.trim()).parseValue();
     }
 
