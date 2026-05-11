@@ -1,11 +1,12 @@
 import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 
 public class CGIHandler {
-    private static final int TIMEOUT = 10;
+    private static final int TIMEOUT = 300;
 
     public static byte[] execute(String scriptPath, String method,
-            Map<String, String> headers, byte[] body, String queryString) throws IOException {
+            Map<String, String> headers, Path bodyFile, long bodyLength, String queryString) throws IOException {
 
         File scriptFile = new File(scriptPath);
         if (!scriptFile.exists() || !scriptFile.isFile()) {
@@ -18,21 +19,19 @@ public class CGIHandler {
         env.put("SCRIPT_FILENAME", scriptPath);
         env.put("QUERY_STRING", queryString != null ? queryString : "");
         env.put("CONTENT_TYPE", headers.getOrDefault("content-type", ""));
-        env.put("CONTENT_LENGTH", String.valueOf(body != null ? body.length : 0));
+        env.put("CONTENT_LENGTH", String.valueOf(bodyLength));
         env.put("SERVER_PROTOCOL", "HTTP/1.1");
         env.put("GATEWAY_INTERFACE", "CGI/1.1");
 
-        pb.redirectInput(ProcessBuilder.Redirect.PIPE);
+        if (bodyFile != null) pb.redirectInput(bodyFile.toFile());
+        else pb.redirectInput(ProcessBuilder.Redirect.PIPE);
         pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
         pb.redirectError(ProcessBuilder.Redirect.INHERIT);
 
         Process p = pb.start();
-        if (body != null && body.length > 0) {
-            p.getOutputStream().write(body);
-
+        if (bodyFile == null) {
+            p.getOutputStream().close();
         }
-        ;
-        p.getOutputStream().close();
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[4096];

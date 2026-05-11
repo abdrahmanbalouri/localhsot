@@ -57,13 +57,14 @@ java -cp out Main config.json
           "path": "/upload",
           "root": "uploads",
           "methods": ["GET", "POST", "DELETE"],
-          "client_body_limit": 10485760
+          "client_body_limit": 21474836480
         },
         {
           "path": "/cgi",
           "root": "cgi",
           "methods": ["GET", "POST", "DELETE"],
-          "cgi_extensions": [".py"]
+          "cgi_extensions": [".py"],
+          "client_body_limit": 21474836480
         },
         {
           "path": "/redirect",
@@ -84,7 +85,7 @@ java -cp out Main config.json
 | `ports` | lista d ports (9dder tzid bzaaf) |
 | `server_name` | Hostname (virtual hosting) |
 | `error_pages` | Custom error pages (code → path) |
-| `client_body_limit` | Taille max d'body (bytes) |
+| `client_body_limit` | Taille max d'body (bytes), supports large `long` values like 21474836480 (20 GiB) |
 | `routes[].path` | URL prefix |
 | `routes[].root` | Directory racine |
 | `routes[].methods` | HTTP methods acceptés |

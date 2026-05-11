@@ -6,31 +6,46 @@ import java.nio.charset.*;
 import java.nio.file.*;
 import java.util.*;
 public class Server {
+    private static final int READ_BUFFER_SIZE = 8192;
+    private static final int MAX_HEADER_BYTES = 64 * 1024;
+    private static final int MAX_CHUNK_LINE_BYTES = 8192;
+
     public static class Route {
         String path;
         Set<String> methods;
         String root, defaultFile, redirect;
         boolean directoryListing;
         Set<String> cgiExtensions;
-        int clientBodyLimit = 1_048_576;
+        long clientBodyLimit = 1_048_576L;
     }
 
     public static class VirtualServer {
         String host = "127.0.0.1", serverName = "";
         int[] ports;
         Map<Integer, String> errorPages = new HashMap<>();
-        int clientBodyLimit = 1_048_576;
+        long clientBodyLimit = 1_048_576L;
         List<Route> routes = new ArrayList<>();
     }
 
     static class Connection {
-        ByteBuffer buf = ByteBuffer.allocate(8192);
-        ByteArrayOutputStream data = new ByteArrayOutputStream();
+        ByteBuffer buf = ByteBuffer.allocate(READ_BUFFER_SIZE);
+        ByteArrayOutputStream headerData = new ByteArrayOutputStream();
         List<VirtualServer> possibleServers = new ArrayList<>();
         VirtualServer server; Route route;
         String method, path, queryString, version;
         Map<String, String> headers = new LinkedHashMap<>();
-        byte[] body;
+        Path bodyFile;
+        OutputStream bodyOut;
+        long bodyLength;
+        long expectedBodyLength = -1;
+        boolean headersParsed;
+        boolean chunked;
+        boolean bodyComplete;
+        int requestErrorStatus;
+        int chunkState;
+        long chunkRemaining;
+        int chunkCrlfRead;
+        StringBuilder chunkLine = new StringBuilder();
         int statusCode = 200;
         String statusMessage = "OK";
         Map<String, String> resHeaders = new LinkedHashMap<>();
@@ -64,7 +79,7 @@ public class Server {
             if (eps != null) for (Map.Entry<String, Object> e : eps.entrySet())
                 vs.errorPages.put(Integer.parseInt(e.getKey()), (String) e.getValue());
             if (cfg.containsKey("client_body_limit"))
-                vs.clientBodyLimit = ((Number) cfg.get("client_body_limit")).intValue();
+                vs.clientBodyLimit = ((Number) cfg.get("client_body_limit")).longValue();
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> rs = (List<Map<String, Object>>) cfg.get("routes");
             if (rs != null) for (Map<String, Object> rc : rs) {
@@ -81,7 +96,7 @@ public class Server {
                 List<String> cg = (List<String>) rc.get("cgi_extensions");
                 r.cgiExtensions = cg != null ? new HashSet<>(cg) : new HashSet<>();
                 if (rc.containsKey("client_body_limit"))
-                    r.clientBodyLimit = ((Number) rc.get("client_body_limit")).intValue();
+                    r.clientBodyLimit = ((Number) rc.get("client_body_limit")).longValue();
                 else r.clientBodyLimit = vs.clientBodyLimit;
                 vs.routes.add(r);
             }
@@ -160,10 +175,18 @@ public class Server {
         c.buf.flip();
         byte[] bytes = new byte[c.buf.limit()];
         c.buf.get(bytes);
-        c.data.write(bytes);
-        if (tryParse(c)) {
+        boolean ready;
+        try {
+            ready = consumeRequest(c, bytes, 0, bytes.length);
+        } catch (IOException e) {
+            c.requestErrorStatus = 500;
+            ready = true;
+        }
+        if (ready) {
+            closeBodyWriter(c);
             process(c);
             prepareResponse(c);
+            cleanupBody(c);
             key.interestOps(SelectionKey.OP_WRITE);
         }
     }
@@ -178,19 +201,42 @@ public class Server {
         if (!c.buf.hasRemaining()) closeQuietly(key);
     }
 
-    private boolean tryParse(Connection c) {
-        byte[] raw = c.data.toByteArray();
+    private boolean consumeRequest(Connection c, byte[] bytes, int off, int len) throws IOException {
+        if (!c.headersParsed) {
+            c.headerData.write(bytes, off, len);
+            if (c.headerData.size() > MAX_HEADER_BYTES) {
+                return failRequest(c, 400);
+            }
+            byte[] raw = c.headerData.toByteArray();
+            int headerEnd = findHeaderEnd(raw);
+            if (headerEnd == -1) return false;
+            if (!parseHeaders(c, raw, headerEnd)) return true;
+            c.headersParsed = true;
+            c.headerData = null;
+            if (prepareBodyState(c)) return true;
+            int bodyStart = headerEnd + 4;
+            if (bodyStart < raw.length) {
+                return consumeBody(c, raw, bodyStart, raw.length - bodyStart);
+            }
+            return c.bodyComplete || c.requestErrorStatus != 0 || c.parseError;
+        }
+        return consumeBody(c, bytes, off, len);
+    }
+
+    private int findHeaderEnd(byte[] raw) {
         int headerEnd = -1;
         for (int i = 0; i < raw.length - 3; i++)
             if (raw[i] == '\r' && raw[i+1] == '\n' && raw[i+2] == '\r' && raw[i+3] == '\n') { headerEnd = i; break; }
-        if (headerEnd == -1) return false;
+        return headerEnd;
+    }
 
+    private boolean parseHeaders(Connection c, byte[] raw, int headerEnd) {
         String hdr = new String(raw, 0, headerEnd, StandardCharsets.ISO_8859_1);
         String[] lines = hdr.split("\r\n");
-        if (lines.length == 0) return false;
+        if (lines.length == 0) { failRequest(c, 400); return false; }
 
         String[] rl = lines[0].split(" ", 3);
-        if (rl.length < 3) { c.parseError = true; return true; }
+        if (rl.length < 3) { failRequest(c, 400); return false; }
         c.method = rl[0];
         String fullPath = rl[1];
         c.version = rl[2];
@@ -205,49 +251,171 @@ public class Server {
             if (colon > 0) c.headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim());
         }
 
-        int headerTotal = headerEnd + 4;
-        int bodyBytes = raw.length - headerTotal;
-        byte[] bodyPart = headerTotal < raw.length ? Arrays.copyOfRange(raw, headerTotal, raw.length) : new byte[0];
-        String cl = c.headers.get("content-length");
-        String te = c.headers.get("transfer-encoding");
+        selectServerAndRoute(c);
+        return true;
+    }
 
-        if (te != null && te.contains("chunked")) {
-            try { c.body = parseChunked(bodyPart); if (c.body == null) return false; } catch (Exception e) { c.parseError = true; return true; }
-            return c.body != null;
-        } else if (cl != null) {
-            try {
-                int len = Integer.parseInt(cl.trim());
-                if (bodyBytes < len) return false;
-                c.body = bodyPart;
-                return true;
-            } catch (NumberFormatException e) { c.parseError = true; return true; }
-        } else {
-            c.body = new byte[0];
+    private boolean prepareBodyState(Connection c) {
+        if (c.route == null) return failRequest(c, 404);
+        if (!c.route.methods.contains(c.method)) {
+            c.resHeaders.put("Allow", String.join(", ", c.route.methods));
+            return failRequest(c, 405);
+        }
+        if (c.route.redirect != null) {
+            c.bodyComplete = true;
             return true;
         }
-    }
 
-    private byte[] parseChunked(byte[] data) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int pos = 0;
-        while (pos < data.length) {
-            int crlf = -1;
-            for (int i = pos; i < data.length - 1; i++)
-                if (data[i] == '\r' && data[i+1] == '\n') { crlf = i; break; }
-            if (crlf == -1) return null;
-            String sizeStr = new String(data, pos, crlf - pos, StandardCharsets.US_ASCII).trim();
-            int size = Integer.parseInt(sizeStr, 16);
-            pos = crlf + 2;
-            if (size == 0) return out.toByteArray();
-            if (pos + size + 2 > data.length) return null;
-            out.write(data, pos, size);
-            pos += size + 2;
+        String cl = c.headers.get("content-length");
+        String te = c.headers.get("transfer-encoding");
+        c.chunked = te != null && te.toLowerCase(Locale.ROOT).contains("chunked");
+
+        if (c.chunked) {
+            c.expectedBodyLength = -1;
+            return false;
         }
-        return null;
+        if (cl != null) {
+            try {
+                long len = Long.parseLong(cl.trim());
+                if (len < 0) return failRequest(c, 400);
+                if (len > c.route.clientBodyLimit) return failRequest(c, 413);
+                c.expectedBodyLength = len;
+                c.bodyComplete = len == 0;
+                return c.bodyComplete;
+            } catch (NumberFormatException e) { return failRequest(c, 400); }
+        }
+        c.expectedBodyLength = 0;
+        c.bodyComplete = true;
+        return true;
     }
 
-    private void process(Connection c) {
-        if (c.parseError) { sendErrorNow(c, 400); return; }
+    private boolean consumeBody(Connection c, byte[] data, int off, int len) throws IOException {
+        if (c.requestErrorStatus != 0 || c.parseError || c.bodyComplete) return true;
+        if (c.chunked) return consumeChunkedBody(c, data, off, len);
+
+        long remaining = c.expectedBodyLength - c.bodyLength;
+        int take = (int)Math.min(remaining, len);
+        if (take > 0) writeBody(c, data, off, take);
+        if (c.bodyLength == c.expectedBodyLength) {
+            c.bodyComplete = true;
+            closeBodyWriter(c);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean consumeChunkedBody(Connection c, byte[] data, int off, int len) throws IOException {
+        int pos = off;
+        int end = off + len;
+        while (pos < end && c.requestErrorStatus == 0 && !c.parseError && !c.bodyComplete) {
+            if (c.chunkState == 0) {
+                while (pos < end) {
+                    byte b = data[pos++];
+                    c.chunkLine.append((char)(b & 0xff));
+                    if (c.chunkLine.length() > MAX_CHUNK_LINE_BYTES) return failRequest(c, 400);
+                    if (b == '\n') {
+                        String line = stripCrlf(c.chunkLine.toString());
+                        c.chunkLine.setLength(0);
+                        int semicolon = line.indexOf(';');
+                        if (semicolon >= 0) line = line.substring(0, semicolon);
+                        line = line.trim();
+                        if (line.isEmpty()) return failRequest(c, 400);
+                        try {
+                            c.chunkRemaining = Long.parseLong(line, 16);
+                        } catch (NumberFormatException e) {
+                            return failRequest(c, 400);
+                        }
+                        if (c.chunkRemaining < 0) return failRequest(c, 400);
+                        c.chunkState = c.chunkRemaining == 0 ? 3 : 1;
+                        break;
+                    }
+                }
+            } else if (c.chunkState == 1) {
+                int take = (int)Math.min(c.chunkRemaining, end - pos);
+                if (take == 0) break;
+                if (take > c.route.clientBodyLimit - c.bodyLength) return failRequest(c, 413);
+                writeBody(c, data, pos, take);
+                pos += take;
+                c.chunkRemaining -= take;
+                if (c.chunkRemaining == 0) {
+                    c.chunkState = 2;
+                    c.chunkCrlfRead = 0;
+                }
+            } else if (c.chunkState == 2) {
+                while (pos < end && c.chunkCrlfRead < 2) {
+                    byte b = data[pos++];
+                    if (c.chunkCrlfRead == 0 && b != '\r') return failRequest(c, 400);
+                    if (c.chunkCrlfRead == 1 && b != '\n') return failRequest(c, 400);
+                    c.chunkCrlfRead++;
+                }
+                if (c.chunkCrlfRead == 2) c.chunkState = 0;
+            } else {
+                while (pos < end) {
+                    byte b = data[pos++];
+                    c.chunkLine.append((char)(b & 0xff));
+                    if (c.chunkLine.length() > MAX_CHUNK_LINE_BYTES) return failRequest(c, 400);
+                    if (b == '\n') {
+                        String line = stripCrlf(c.chunkLine.toString());
+                        c.chunkLine.setLength(0);
+                        if (line.isEmpty()) {
+                            c.bodyComplete = true;
+                            closeBodyWriter(c);
+                            return true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        return c.bodyComplete || c.requestErrorStatus != 0 || c.parseError;
+    }
+
+    private String stripCrlf(String line) {
+        if (line.endsWith("\n")) line = line.substring(0, line.length() - 1);
+        if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+        return line;
+    }
+
+    private void writeBody(Connection c, byte[] data, int off, int len) throws IOException {
+        if (len <= 0) return;
+        if (c.bodyOut == null) {
+            c.bodyFile = Files.createTempFile("java-localserver-body-", ".tmp");
+            c.bodyOut = Files.newOutputStream(c.bodyFile, StandardOpenOption.WRITE);
+        }
+        c.bodyOut.write(data, off, len);
+        c.bodyLength += len;
+    }
+
+    private void closeBodyWriter(Connection c) {
+        if (c.bodyOut != null) {
+            try { c.bodyOut.close(); } catch (IOException e) {}
+            c.bodyOut = null;
+        }
+    }
+
+    private void cleanupBody(Connection c) {
+        closeBodyWriter(c);
+        if (c.bodyFile != null) {
+            try { Files.deleteIfExists(c.bodyFile); } catch (IOException e) {}
+            c.bodyFile = null;
+        }
+    }
+
+    private boolean failRequest(Connection c, int status) {
+        if (status == 400) c.parseError = true;
+        c.requestErrorStatus = status;
+        c.bodyComplete = true;
+        closeBodyWriter(c);
+        if (c.server == null) selectDefaultServer(c);
+        return true;
+    }
+
+    private void selectDefaultServer(Connection c) {
+        if (c.server == null && c.possibleServers != null && !c.possibleServers.isEmpty())
+            c.server = c.possibleServers.get(0);
+    }
+
+    private void selectServerAndRoute(Connection c) {
         String hostHeader = c.headers.get("host");
         if (hostHeader != null && hostHeader.contains(":")) {
             hostHeader = hostHeader.split(":", 2)[0];
@@ -257,8 +425,14 @@ public class Server {
             .filter(vs -> vs.serverName.equalsIgnoreCase(finalHost))
             .findFirst()
             .orElse(c.possibleServers.get(0));
-            System.out.println(c.path);
         c.route = router.match(c.server, c.path);
+    }
+
+    private void process(Connection c) {
+        selectDefaultServer(c);
+        if (c.parseError) { sendErrorNow(c, 400); return; }
+        if (c.requestErrorStatus != 0) { sendErrorNow(c, c.requestErrorStatus); return; }
+        if (c.route == null) c.route = router.match(c.server, c.path);
         if (c.route == null) { sendErrorNow(c, 404); return; }
         if (!c.route.methods.contains(c.method)) {
             sendErrorNow(c, 405);
@@ -270,7 +444,7 @@ public class Server {
             c.resHeaders.put("Location", c.route.redirect);
             c.resBody = new byte[0]; return;
         }
-        if (c.body != null && c.body.length > c.route.clientBodyLimit) { sendErrorNow(c, 413); return; }
+        if (c.bodyLength > c.route.clientBodyLimit) { sendErrorNow(c, 413); return; }
         handleSession(c);
         switch (c.method) {
             case "GET": handleGet(c); break;
@@ -309,7 +483,7 @@ public class Server {
         if (!Files.exists(p) && c.route.path.equals("/")) { serveFile(c); return; }
         try {
             Files.createDirectories(p.getParent());
-            Files.write(p, c.body);
+            saveBodyToFile(c, p);
             c.statusCode = 201; c.statusMessage = "Created";
             c.resBody = ("<html><body><h1>201 Created</h1><p>" + c.method + " file uploaded successfully</p></body></html>").getBytes();
             c.resHeaders.put("Content-Type", "text/html; charset=utf-8");
@@ -348,7 +522,7 @@ public class Server {
 
     private void runCGI(Connection c) {
         try {    
-            byte[] out = CGIHandler.execute(resolvePath(c), c.method, c.headers, c.body, c.queryString);
+            byte[] out = CGIHandler.execute(resolvePath(c), c.method, c.headers, c.bodyFile, c.bodyLength, c.queryString);
             String outStr = new String(out, StandardCharsets.ISO_8859_1);
             int sep = outStr.indexOf("\r\n\r\n");
             if (sep < 0) sep = outStr.indexOf("\n\n");
@@ -373,6 +547,22 @@ public class Server {
               if (e instanceof FileNotFoundException) sendErrorNow(c, 404);
               else  
             sendErrorNow(c, 500); }
+    }
+
+    private void saveBodyToFile(Connection c, Path target) throws IOException {
+         closeBodyWriter(c);
+        if (c.bodyFile == null) {
+            Files.write(target, new byte[0], StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            return;
+        }
+        try {
+            Files.move(c.bodyFile, target, StandardCopyOption.REPLACE_EXISTING);
+            c.bodyFile = null;
+        } catch (IOException moveError) {
+            Files.copy(c.bodyFile, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(c.bodyFile);
+            c.bodyFile = null;
+        }
     }
 
     private void serveFile(Connection c) {
@@ -420,6 +610,7 @@ public class Server {
     }
 
     private void sendErrorNow(Connection c, int code) {
+        selectDefaultServer(c);
         c.statusCode = code;
         c.statusMessage = getStatusMessage(code);
         String ep = c.server.errorPages.get(code);
@@ -450,6 +641,8 @@ public class Server {
     }
 
     private void closeQuietly(SelectionKey key) {
+        Object attachment = key.attachment();
+        if (attachment instanceof Connection) cleanupBody((Connection)attachment);
         try { if (key.channel() instanceof SocketChannel) key.channel().close(); } catch (IOException e) {}
         key.cancel();
     }
