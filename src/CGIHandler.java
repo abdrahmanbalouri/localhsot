@@ -9,7 +9,6 @@ public class CGIHandler {
 
         File scriptFile = new File(scriptPath);
         if (!scriptFile.exists() || !scriptFile.isFile()) {
-
             throw new FileNotFoundException("CGI script not found: " + scriptPath);
         }
         ProcessBuilder pb = new ProcessBuilder("python3", scriptPath);

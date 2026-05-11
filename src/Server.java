@@ -169,6 +169,7 @@ public class Server {
     }
 
     private void handleWrite(SelectionKey key) throws IOException {
+
         SocketChannel sc = (SocketChannel) key.channel();
         Connection c = (Connection) key.attachment();
         c.lastActive = System.currentTimeMillis();
@@ -256,6 +257,7 @@ public class Server {
             .filter(vs -> vs.serverName.equalsIgnoreCase(finalHost))
             .findFirst()
             .orElse(c.possibleServers.get(0));
+            System.out.println(c.path);
         c.route = router.match(c.server, c.path);
         if (c.route == null) { sendErrorNow(c, 404); return; }
         if (!c.route.methods.contains(c.method)) {
@@ -308,7 +310,9 @@ public class Server {
             Files.createDirectories(p.getParent());
             Files.write(p, c.body);
             c.statusCode = 201; c.statusMessage = "Created";
-            c.resBody = new byte[0];
+            c.resBody = ("<html><body><h1>201 Created</h1><p>" + c.method + " file uploaded successfully</p></body></html>").getBytes();
+            c.resHeaders.put("Content-Type", "text/html; charset=utf-8");
+            System.out.println("Saved file to " + p.toString());
         } catch (IOException e) { sendErrorNow(c, 500); }
     }
 
@@ -321,8 +325,9 @@ public class Server {
         if (!Files.exists(p) && c.route.path.equals("/")) { serveFile(c); return; }
         try {
             if (Files.deleteIfExists(p)) {
-                c.statusCode = 204; c.statusMessage = "No Content";
-                c.resBody = new byte[0];
+                c.statusCode = 200; c.statusMessage = "OK";
+                c.resBody = ("<html><body><h1>200 OK</h1><p>" + c.method + " file deleted successfully</p></body></html>").getBytes();
+                c.resHeaders.put("Content-Type", "text/html; charset=utf-8");
             } else sendErrorNow(c, 404);
         } catch (IOException e) { sendErrorNow(c, 500); }
     }

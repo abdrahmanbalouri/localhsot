@@ -18,7 +18,7 @@
           "path": "/",
           "root": "www",
           "default_file": "index.html",
-          "methods": ["GET", "POST", "DELETE"],
+          "methods": ["GET"],
           "directory_listing": false
         },
         {
