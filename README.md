@@ -62,7 +62,7 @@ java -cp out Main config.json
         {
           "path": "/cgi",
           "root": "cgi",
-          "methods": ["GET", "POST"],
+          "methods": ["GET", "POST", "DELETE"],
           "cgi_extensions": [".py"]
         },
         {
@@ -101,9 +101,9 @@ java -cp out Main config.json
 - **HTTP/1.1** — requests w responses standards
 - **Non-blocking I/O** — `java.nio.channels.Selector`, single thread
 - **Multi-ports** — chaque server peut écouter sur plusieurs ports
-- **GET / POST / DELETE** — static files, upload, delete
+- **GET / POST / DELETE** — methods allowed by JSON can serve static files; create/delete only under `/upload`
 - **Chunked encoding** — Transfer-Encoding: chunked (request + response)
-- **CGI** — exécute `.py` scripts via `ProcessBuilder`
+- **CGI** — exécute any `.py` script under `/cgi/` via `ProcessBuilder` for allowed methods
 - **Cookies & Sessions** — session_id, stockage côté serveur (1h timeout)
 - **Error pages** — 400, 403, 404, 405, 413, 500 (customisables)
 - **Client body limit** — contrôle global + par route
@@ -190,7 +190,7 @@ Client → SocketChannel → Selector (OP_READ)
     → process()
       → router.match() → route
       → handleGet / handlePost / handleDelete
-        → serveFile / runCGI / upload / delete
+        → serveFile / runCGI / create/delete under /upload
     → prepareResponse()
     → Selector (OP_WRITE) → write bytes → close
 ```

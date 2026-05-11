@@ -18,7 +18,7 @@
           "path": "/",
           "root": "www",
           "default_file": "index.html",
-          "methods": ["GET"],
+          "methods": ["GET","DELETE","POST"],
           "directory_listing": false
         },
         {
@@ -28,9 +28,17 @@
           "client_body_limit": 10485760
         },
         {
+
+          "path": "/ddd",
+          "root": "www",
+          "default_file": "index.html",
+          "methods": ["GET","DELETE","POST"],
+          "directory_listing": false
+        },
+        {
           "path": "/cgi",
           "root": "cgi",
-          "methods": ["GET", "POST"],
+          "methods": ["GET","POST","DELETE"],
           "cgi_extensions": [".py"]
         },
         {
@@ -57,7 +65,7 @@
           "path": "/",
           "root": "www",
           "default_file": "index.html",
-          "methods": ["GET", "POST", "DELETE"],
+          "methods": ["GET"],
           "directory_listing": false
         },
         {
@@ -69,7 +77,7 @@
         {
           "path": "/cgi",
           "root": "cgi",
-          "methods": ["GET", "POST"],
+          "methods": ["GET","POST","DELETE"],
           "cgi_extensions": [".py"]
         },
         {

@@ -11,11 +11,16 @@ public class Router {
         Server.Route best = null;
         int bestLen = -1;
         for (Server.Route r : vs.routes) {
-            if (path.startsWith(r.path) && r.path.length() > bestLen) {
+            if (matches(r.path, path) && r.path.length() > bestLen) {
                 best = r;
                 bestLen = r.path.length();
             }
         }
         return best;
+    }
+
+    private boolean matches(String routePath, String requestPath) {
+        if ("/".equals(routePath)) return true;
+        return requestPath.equals(routePath) || requestPath.startsWith(routePath + "/");
     }
 }

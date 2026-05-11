@@ -72,7 +72,7 @@ public class Server {
                 r.path = (String) rc.get("path");
                 @SuppressWarnings("unchecked")
                 List<String> ms = (List<String>) rc.get("methods");
-                r.methods = ms != null ? new HashSet<>(ms) : new HashSet<>(List.of("GET"));
+                r.methods = ms != null ? new LinkedHashSet<>(ms) : new LinkedHashSet<>(List.of("GET"));
                 r.root = (String) rc.get("root");
                 r.defaultFile = (String) rc.get("default_file");
                 r.redirect = (String) rc.get("redirect");
@@ -300,6 +300,7 @@ public class Server {
 
     private void handlePost(Connection c) {
         if (hasCGI(c)) { runCGI(c); return; }
+        if (!isUploadRoute(c)) { serveFile(c); return; }
         String filePath = resolvePath(c);
         Path p = Paths.get(filePath);
         if (Files.exists(p) && Files.isDirectory(p)) {
@@ -317,6 +318,8 @@ public class Server {
     }
 
     private void handleDelete(Connection c) {
+        if (hasCGI(c)) { runCGI(c); return; }
+        if (!isUploadRoute(c)) { serveFile(c); return; }
         String filePath = resolvePath(c);
         Path p = Paths.get(filePath);
         if (Files.exists(p) && Files.isDirectory(p)) {
@@ -330,6 +333,10 @@ public class Server {
                 c.resHeaders.put("Content-Type", "text/html; charset=utf-8");
             } else sendErrorNow(c, 404);
         } catch (IOException e) { sendErrorNow(c, 500); }
+    }
+
+    private boolean isUploadRoute(Connection c) {
+        return c.route != null && "/upload".equals(c.route.path);
     }
 
     private boolean hasCGI(Connection c) {
