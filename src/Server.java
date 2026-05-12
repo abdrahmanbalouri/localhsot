@@ -41,7 +41,7 @@ public class Server {
         OutputStream bodyOut;
         long bodyLen, contentLen = -1;
         boolean chunked;
-        int chunkState;
+        int chunkState;        // 0=read line (size or inter-chunk CRLF), 1=read data, 2=read trailer
         long chunkLeft;
         StringBuilder chunkLine = new StringBuilder();
 
@@ -290,50 +290,45 @@ public class Server {
     private void consumeChunked(Connection c, byte[] data, int off, int len) throws IOException {
         int p = off, end = off + len;
         while (p < end && c.errorStatus == 0 && !c.bodyDone) {
-            if (c.chunkState == 0) { // size line
-                while (p < end) {
-                    char ch = (char) (data[p++] & 0xff);
-                    if (ch == '\n') {
-                        String line = c.chunkLine.toString().trim();
-                        int sc = line.indexOf(';');
-                        if (sc >= 0) line = line.substring(0, sc).trim();
-                        c.chunkLine.setLength(0);
-                        try { c.chunkLeft = Long.parseLong(line, 16); }
-                        catch (NumberFormatException e) { fail(c, 400); return; }
-                        if (c.chunkLeft < 0) { fail(c, 400); return; }
-                        c.chunkState = c.chunkLeft == 0 ? 3 : 1;
-                        break;
-                    }
-                    c.chunkLine.append(ch);
-                    if (c.chunkLine.length() > 8192) { fail(c, 400); return; }
-                }
-            } else if (c.chunkState == 1) { // data
+            if (c.chunkState == 1) {
+                // reading chunk data
                 int take = (int) Math.min(c.chunkLeft, end - p);
                 if (c.bodyLen + take > c.route.clientBodyLimit) { fail(c, 413); return; }
                 writeBody(c, data, p, take);
                 p += take;
                 c.chunkLeft -= take;
-                if (c.chunkLeft == 0) c.chunkState = 2;
-            } else if (c.chunkState == 2) { // trailing CRLF after data
-                while (p < end && c.chunkLine.length() < 2) c.chunkLine.append((char)(data[p++] & 0xff));
-                if (c.chunkLine.length() == 2) {
-                    if (!"\r\n".equals(c.chunkLine.toString())) { fail(c, 400); return; }
-                    c.chunkLine.setLength(0);
-                    c.chunkState = 0;
-                }
-            } else { // trailer/terminator
-                while (p < end) {
-                    char ch = (char) (data[p++] & 0xff);
-                    if (ch == '\n') {
-                        String line = c.chunkLine.toString();
-                        if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
-                        c.chunkLine.setLength(0);
-                        if (line.isEmpty()) { c.bodyDone = true; closeBodyOut(c); return; }
-                        break;
-                    }
-                    c.chunkLine.append(ch);
-                }
+                if (c.chunkLeft == 0) c.chunkState = 0; // back to reading a line (CRLF after chunk)
+                continue;
             }
+            // state 0 or 2: read one line into chunkLine
+            String line = null;
+            while (p < end) {
+                char ch = (char) (data[p++] & 0xff);
+                if (ch == '\n') {
+                    line = c.chunkLine.toString();
+                    if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+                    c.chunkLine.setLength(0);
+                    break;
+                }
+                c.chunkLine.append(ch);
+                if (c.chunkLine.length() > 8192) { fail(c, 400); return; }
+            }
+            if (line == null) return; // need more data
+            if (c.chunkState == 2) {
+                // trailer: empty line = end of body
+                if (line.isEmpty()) { c.bodyDone = true; closeBodyOut(c); return; }
+                // else: ignore trailer header, keep reading
+                continue;
+            }
+            // state 0: either the CRLF after previous chunk data (empty line) or a size line
+            if (line.isEmpty()) continue;
+            int sc = line.indexOf(';');
+            if (sc >= 0) line = line.substring(0, sc);
+            line = line.trim();
+            try { c.chunkLeft = Long.parseLong(line, 16); }
+            catch (NumberFormatException e) { fail(c, 400); return; }
+            if (c.chunkLeft < 0) { fail(c, 400); return; }
+            c.chunkState = c.chunkLeft == 0 ? 2 : 1; // 0 size -> read trailer, else read data
         }
     }
 
