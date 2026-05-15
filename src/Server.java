@@ -52,6 +52,11 @@ public class Server {
         byte[] resBody;
         ByteBuffer writeBuf;
         long lastActive = System.currentTimeMillis();
+
+        // streaming file response
+        Path responseFile;
+        FileChannel fileChannel;
+        long fileOffset, fileSize;
     }
 
     private Selector selector;
@@ -169,7 +174,12 @@ public class Server {
         READ_BUF.get(data);
 
         try { feed(c, data); }
-        catch (Exception e) { c.errorStatus = 500; c.bodyDone = true; }
+        catch (Exception e) {
+            System.err.println("Error processing request: " + e.getClass().getName() + ": " + e.getMessage());
+            e.printStackTrace(System.err);
+            c.errorStatus = 500;
+            c.bodyDone = true;
+        }
 
         if (c.bodyDone || c.errorStatus != 0) {
             closeBodyOut(c);
@@ -184,13 +194,36 @@ public class Server {
         SocketChannel sc = (SocketChannel) key.channel();
         Connection c = (Connection) key.attachment();
         c.lastActive = System.currentTimeMillis();
-        if (c.writeBuf == null || !c.writeBuf.hasRemaining()) { close(key); return; }
-        sc.write(c.writeBuf);
-        if (!c.writeBuf.hasRemaining()) close(key);
+
+        // write headers (and in-memory body if no streaming file)
+        if (c.writeBuf != null && c.writeBuf.hasRemaining()) {
+            sc.write(c.writeBuf);
+            if (c.writeBuf.hasRemaining()) return;
+        }
+
+        // stream file content if present
+        if (c.fileChannel != null) {
+            long transferred = c.fileChannel.transferTo(c.fileOffset, 65536, sc);
+            if (transferred > 0) c.fileOffset += transferred;
+            if (c.fileOffset >= c.fileSize) {
+                close(key);
+            }
+            return;
+        }
+
+        // everything written
+        close(key);
     }
 
     private void close(SelectionKey key) {
-        if (key.attachment() instanceof Connection) cleanupBody((Connection) key.attachment());
+        if (key.attachment() instanceof Connection) {
+            Connection c = (Connection) key.attachment();
+            cleanupBody(c);
+            if (c.fileChannel != null) {
+                try { c.fileChannel.close(); } catch (IOException e) {}
+                c.fileChannel = null;
+            }
+        }
         try { key.channel().close(); } catch (IOException e) {}
         key.cancel();
     }
@@ -335,8 +368,10 @@ public class Server {
     private void writeBody(Connection c, byte[] data, int off, int len) throws IOException {
         if (len <= 0) return;
         if (c.bodyOut == null) {
-            c.bodyFile = Files.createTempFile("body-", ".tmp");
-            c.bodyOut = Files.newOutputStream(c.bodyFile);
+            Path tmpDir = Paths.get(".tmp");
+            Files.createDirectories(tmpDir);
+            c.bodyFile = Files.createTempFile(tmpDir, "body-", ".tmp");
+            c.bodyOut = new BufferedOutputStream(Files.newOutputStream(c.bodyFile), 65536);
         }
         c.bodyOut.write(data, off, len);
         c.bodyLen += len;
@@ -465,7 +500,9 @@ public class Server {
         }
         if (!Files.exists(p) || !Files.isReadable(p)) { sendError(c, 404); return; }
         try {
-            c.resBody = Files.readAllBytes(p);
+            c.responseFile = p;
+            c.fileSize = Files.size(p);
+            c.fileOffset = 0;
             c.resHeaders.put("Content-Type", mimeType(p.getFileName().toString()));
         } catch (IOException e) { sendError(c, 500); }
     }
@@ -508,11 +545,28 @@ public class Server {
     }
 
     private void buildResponse(Connection c) {
-        if (c.resBody == null) c.resBody = new byte[0];
         c.resHeaders.putIfAbsent("Content-Type", "text/html");
-        c.resHeaders.put("Content-Length", String.valueOf(c.resBody.length));
         c.resHeaders.put("Connection", "close");
         c.resHeaders.put("Server", "java-localserver");
+
+        if (c.responseFile != null) {
+            // streaming file: headers-only buffer, file sent via FileChannel
+            c.resHeaders.put("Content-Length", String.valueOf(c.fileSize));
+            try {
+                c.fileChannel = FileChannel.open(c.responseFile, StandardOpenOption.READ);
+            } catch (IOException e) {
+                c.responseFile = null;
+                c.fileChannel = null;
+                sendError(c, 500);
+                // fall through to in-memory path
+            }
+        }
+
+        if (c.responseFile == null) {
+            // in-memory response (errors, uploads, directory listings, small pages)
+            if (c.resBody == null) c.resBody = new byte[0];
+            c.resHeaders.put("Content-Length", String.valueOf(c.resBody.length));
+        }
 
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 ").append(c.status).append(' ').append(c.statusMsg).append("\r\n");
@@ -521,10 +575,16 @@ public class Server {
         sb.append("\r\n");
 
         byte[] hb = sb.toString().getBytes(StandardCharsets.ISO_8859_1);
-        byte[] full = new byte[hb.length + c.resBody.length];
-        System.arraycopy(hb, 0, full, 0, hb.length);
-        System.arraycopy(c.resBody, 0, full, hb.length, c.resBody.length);
-        c.writeBuf = ByteBuffer.wrap(full);
+        if (c.responseFile != null && c.fileChannel != null) {
+            // headers only — file body streamed in write()
+            c.writeBuf = ByteBuffer.wrap(hb);
+        } else {
+            // headers + in-memory body
+            byte[] full = new byte[hb.length + c.resBody.length];
+            System.arraycopy(hb, 0, full, 0, hb.length);
+            System.arraycopy(c.resBody, 0, full, hb.length, c.resBody.length);
+            c.writeBuf = ByteBuffer.wrap(full);
+        }
     }
 
     // ---------- helpers ----------
