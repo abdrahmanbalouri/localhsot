@@ -36,6 +36,7 @@ public class Server {
         String method, path, query;
         Map<String, String> headers = new LinkedHashMap<>();
         boolean headersParsed, bodyDone;
+        int localPort;
 
         Path bodyFile;
         OutputStream bodyOut;
@@ -150,7 +151,6 @@ public class Server {
             sessions.cleanup();
         }
     }
-
     private void accept(SelectionKey key) throws IOException {
         SocketChannel sc = ((ServerSocketChannel) key.channel()).accept();
         sc.configureBlocking(false);
@@ -158,6 +158,7 @@ public class Server {
         @SuppressWarnings("unchecked")
         List<VirtualServer> vsList = (List<VirtualServer>) key.attachment();
         c.candidates = vsList;
+        c.localPort = ((InetSocketAddress) sc.getLocalAddress()).getPort();
         sc.register(selector, SelectionKey.OP_READ, c);
     }
 
@@ -272,17 +273,42 @@ public class Server {
                     lines[i].substring(col + 1).trim());
         }
         selectServer(c);
+        if (c.errorStatus != 0) return false;
         return true;
     }
 
     private void selectServer(Connection c) {
         String host = c.headers.getOrDefault("host", "");
-        if (host.contains(":")) host = host.split(":", 2)[0];
+        int  hostPort = 0 ; 
+        if (host.contains(":")) {
+            String[] parts = host.split(":", 2);
+            host = parts[0];
+            try {
+                hostPort = Integer.parseInt(parts[1].trim());
+            } catch (NumberFormatException e) {
+                fail(c, 400);
+                return;
+            }
+        }
+       
         final String h = host.trim();
         c.server = c.candidates.stream()
                 .filter(v -> v.serverName.equalsIgnoreCase(h))
                 .findFirst()
                 .orElse(c.candidates.get(0));
+
+
+            boolean validPort = false ;
+              for  (int  port : c.server.ports){
+                if  (port  == hostPort ){
+                    validPort = true ; 
+                    break  ;
+                }
+              }
+              if  (!validPort ) {
+                fail(c, 400);
+                return;
+              }
         c.route = router.match(c.server, c.path);
     }
 
@@ -493,9 +519,9 @@ public class Server {
     private void serveFile(Connection c) {
         Path p = Paths.get(resolvePath(c));
         if (Files.isDirectory(p)) {
+            if (c.route.directoryListing) { listDir(c, p); return; }
             Path def = c.route.defaultFile != null ? p.resolve(c.route.defaultFile) : null;
             if (def != null && Files.isReadable(def)) p = def;
-            else if (c.route.directoryListing) { listDir(c, p); return; }
             else { sendError(c, 403); return; }
         }
         if (!Files.exists(p) || !Files.isReadable(p)) { sendError(c, 404); return; }
