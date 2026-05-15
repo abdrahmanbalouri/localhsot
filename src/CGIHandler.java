@@ -3,9 +3,8 @@ import java.nio.file.*;
 import java.util.*;
 
 public class CGIHandler {
-    private static final int TIMEOUT = 300;
 
-    public static byte[] execute(String scriptPath, String method,
+    public static Process start(String scriptPath, String method,
             Map<String, String> headers, Path bodyFile, long bodyLength, String queryString) throws IOException {
 
         File scriptFile = new File(scriptPath);
@@ -32,30 +31,6 @@ public class CGIHandler {
         if (bodyFile == null) {
             p.getOutputStream().close();
         }
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[4096];
-        InputStream is = p.getInputStream();
-        long deadline = System.currentTimeMillis() + TIMEOUT * 1000;
-        try {
-            while (System.currentTimeMillis() < deadline) {
-                if (is.available() > 0) {
-                    int n = is.read(buf);
-                    if (n == -1)
-                        break;
-                    out.write(buf, 0, n);
-                } else {
-                    try {
-                        p.exitValue();
-                        break;
-                    } catch (IllegalThreadStateException e) {
-                    }
-                    Thread.sleep(5);
-                }
-            }
-        } catch (Exception e) {
-        }
-        p.destroyForcibly();
-        return out.toByteArray();
+        return p;
     }
 }

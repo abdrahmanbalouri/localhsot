@@ -9,6 +9,7 @@ import java.util.*;
 public class Server {
     private static final int MAX_HEADER_BYTES = 64 * 1024;
     private static final long TIMEOUT_MS = 30_000;
+    private static final long CGI_TIMEOUT_MS = 10_000;
     private static final ByteBuffer READ_BUF = ByteBuffer.allocate(8192);
 
     public static class Route {
@@ -58,6 +59,12 @@ public class Server {
         Path responseFile;
         FileChannel fileChannel;
         long fileOffset, fileSize;
+
+        // CGI process state
+        Process cgiProcess;
+        InputStream cgiInputStream;
+        ByteArrayOutputStream cgiOutput;
+        long cgiDeadline;
     }
 
     private Selector selector;
@@ -131,7 +138,8 @@ public class Server {
         }
 
         while (true) {
-            selector.select(1000);
+            selector.select(100);
+
             for (SelectionKey key : selector.selectedKeys()) {
                 try {
                     if (key.isAcceptable()) accept(key);
@@ -141,11 +149,18 @@ public class Server {
             }
             selector.selectedKeys().clear();
 
+            // poll running CGI processes
+            for (SelectionKey key : selector.keys()) {
+                if (!(key.channel() instanceof SocketChannel)) continue;
+                Connection c = (Connection) key.attachment();
+                if (c != null && c.cgiProcess != null) pollCGI(c, key);
+            }
+
             long now = System.currentTimeMillis();
             for (SelectionKey key : selector.keys()) {
                 if (key.channel() instanceof SocketChannel) {
                     Connection c = (Connection) key.attachment();
-                    if (c != null && now - c.lastActive > TIMEOUT_MS) close(key);
+                    if (c != null && c.cgiProcess == null && now - c.lastActive > TIMEOUT_MS) close(key);
                 }
             }
             sessions.cleanup();
@@ -184,10 +199,12 @@ public class Server {
 
         if (c.bodyDone || c.errorStatus != 0) {
             closeBodyOut(c);
-            process(c);
-            buildResponse(c);
-            cleanupBody(c);
-            key.interestOps(SelectionKey.OP_WRITE);
+            process(c, key);
+            if (c.cgiProcess == null) {
+                buildResponse(c);
+                cleanupBody(c);
+                key.interestOps(SelectionKey.OP_WRITE);
+            }
         }
     }
 
@@ -223,6 +240,12 @@ public class Server {
             if (c.fileChannel != null) {
                 try { c.fileChannel.close(); } catch (IOException e) {}
                 c.fileChannel = null;
+            }
+            if (c.cgiProcess != null) {
+                c.cgiProcess.destroyForcibly();
+                c.cgiProcess = null;
+                c.cgiInputStream = null;
+                c.cgiOutput = null;
             }
         }
         try { key.channel().close(); } catch (IOException e) {}
@@ -413,7 +436,7 @@ public class Server {
     }
 
     // ---------- dispatch ----------
-    private void process(Connection c) {
+    private void process(Connection c, SelectionKey key) {
         if (c.server == null) c.server = c.candidates.get(0);
         if (c.errorStatus != 0) {
             if (c.errorStatus == 405 && c.route != null)
@@ -428,7 +451,7 @@ public class Server {
         }
         applySession(c);
 
-        if (isCGI(c)) { runCGI(c); return; }
+        if (isCGI(c)) { runCGI(c, key); return; }
 
         boolean upload = "/upload".equals(c.route.path);
         switch (c.method) {
@@ -457,30 +480,92 @@ public class Server {
         return dot >= 0 && c.route.cgiExtensions.contains(f.substring(dot));
     }
 
-    private void runCGI(Connection c) {
+    private void runCGI(Connection c, SelectionKey key) {
         try {
-            byte[] out = CGIHandler.execute(resolvePath(c), c.method, c.headers,
+            Process p = CGIHandler.start(resolvePath(c), c.method, c.headers,
                     c.bodyFile, c.bodyLen, c.query);
-            String s = new String(out, StandardCharsets.ISO_8859_1);
-            int sep = s.indexOf("\r\n\r\n");
-            int hdrEnd = sep >= 0 ? sep + 4 : -1;
-            if (sep < 0) { sep = s.indexOf("\n\n"); hdrEnd = sep >= 0 ? sep + 2 : -1; }
-            if (sep >= 0) {
-                for (String line : s.substring(0, sep).split("\r?\n")) {
-                    int col = line.indexOf(':');
-                    if (col <= 0) continue;
-                    String k = line.substring(0, col).trim();
-                    String v = line.substring(col + 1).trim();
-                    if (k.equalsIgnoreCase("Status")) {
-                        String[] parts = v.split(" ", 2);
-                        c.status = Integer.parseInt(parts[0]);
-                        c.statusMsg = parts.length > 1 ? parts[1] : "";
-                    } else c.resHeaders.put(k, v);
+            c.cgiProcess = p;
+            c.cgiInputStream = p.getInputStream();
+            c.cgiOutput = new ByteArrayOutputStream();
+            c.cgiDeadline = System.currentTimeMillis() + CGI_TIMEOUT_MS;
+            key.interestOps(0); // suspend read/write while CGI runs
+        } catch (FileNotFoundException e) {
+            sendError(c, 404);
+        } catch (Exception e) {
+            System.err.println("CGI start error: " + e.getMessage());
+            sendError(c, 500);
+        }
+    }
+
+    private void pollCGI(Connection c, SelectionKey key) {
+        // read available output without blocking
+        try {
+            int avail = c.cgiInputStream.available();
+            if (avail > 0) {
+                byte[] buf = new byte[Math.min(avail, 8192)];
+                int n = c.cgiInputStream.read(buf);
+                if (n > 0) c.cgiOutput.write(buf, 0, n);
+            }
+        } catch (IOException e) {}
+
+        // check timeout
+        if (System.currentTimeMillis() > c.cgiDeadline) {
+            c.cgiProcess.destroyForcibly();
+            System.err.println("CGI timeout after " + CGI_TIMEOUT_MS + "ms");
+            finishCGI(c, key, true);
+            return;
+        }
+
+        // check if process finished
+        try {
+            c.cgiProcess.exitValue(); // throws IllegalThreadStateException if still running
+            // drain remaining output
+            try {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = c.cgiInputStream.read(buf)) != -1) {
+                    c.cgiOutput.write(buf, 0, n);
                 }
-                c.resBody = Arrays.copyOfRange(out, hdrEnd, out.length);
-            } else c.resBody = out;
-        } catch (FileNotFoundException e) { sendError(c, 404); }
-          catch (Exception e)             { sendError(c, 500); }
+            } catch (IOException e) {}
+            finishCGI(c, key, false);
+        } catch (IllegalThreadStateException e) {
+            // still running, will poll again next iteration
+        }
+    }
+
+    private void finishCGI(Connection c, SelectionKey key, boolean timedOut) {
+        if (timedOut) {
+            sendError(c, 504);
+        } else {
+            parseCGIOutput(c, c.cgiOutput.toByteArray());
+        }
+        c.cgiProcess = null;
+        c.cgiInputStream = null;
+        c.cgiOutput = null;
+        buildResponse(c);
+        cleanupBody(c);
+        if (key.isValid()) key.interestOps(SelectionKey.OP_WRITE);
+    }
+
+    private void parseCGIOutput(Connection c, byte[] out) {
+        String s = new String(out, StandardCharsets.ISO_8859_1);
+        int sep = s.indexOf("\r\n\r\n");
+        int hdrEnd = sep >= 0 ? sep + 4 : -1;
+        if (sep < 0) { sep = s.indexOf("\n\n"); hdrEnd = sep >= 0 ? sep + 2 : -1; }
+        if (sep >= 0) {
+            for (String line : s.substring(0, sep).split("\r?\n")) {
+                int col = line.indexOf(':');
+                if (col <= 0) continue;
+                String k = line.substring(0, col).trim();
+                String v = line.substring(col + 1).trim();
+                if (k.equalsIgnoreCase("Status")) {
+                    String[] parts = v.split(" ", 2);
+                    try { c.status = Integer.parseInt(parts[0]); } catch (NumberFormatException e) {}
+                    c.statusMsg = parts.length > 1 ? parts[1] : "";
+                } else c.resHeaders.put(k, v);
+            }
+            c.resBody = Arrays.copyOfRange(out, hdrEnd, out.length);
+        } else c.resBody = out;
     }
 
     private void doUpload(Connection c) {
@@ -626,6 +711,7 @@ public class Server {
             case 405: return "Method Not Allowed";
             case 413: return "Request Entity Too Large";
             case 500: return "Internal Server Error";
+            case 504: return "Gateway Timeout";
             default:  return "Unknown";
         }
     }
