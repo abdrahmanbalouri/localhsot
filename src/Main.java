@@ -10,6 +10,12 @@ public class Main {
             System.err.println("No servers configured");
             System.exit(1);
         }
-        new Server(servers).start();
+        try {
+            new Server(servers).start();
+        } catch (IllegalArgumentException e) {
+            System.out.println("Co33");
+            System.err.println("Configuration error: " + e.getMessage());
+            System.exit(1);
+        }
     }
 }

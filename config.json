@@ -2,7 +2,7 @@
   "servers": [
     {
       "host": "127.0.0.1",
-      "ports": [8080],
+      "ports": [8080 ],
       "server_name": "localhost",
       "error_pages": {
         "400": "error_pages/400.html",
@@ -19,7 +19,7 @@
           "root": "www",
           "default_file": "index.html",
           "methods": ["GET","DELETE","POST"],
-          "directory_listing": false
+          "directory_listing": true
         },
         {
           "path": "/upload",

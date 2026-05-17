@@ -82,39 +82,82 @@ public class Server {
     // ---------- config ----------
     private List<VirtualServer> parseConfigs(List<Map<String, Object>> configs) {
         List<VirtualServer> list = new ArrayList<>();
-        for (Map<String, Object> cfg : configs) {
-            VirtualServer vs = new VirtualServer();
-            vs.host = (String) cfg.getOrDefault("host", "127.0.0.1");
-            vs.serverName = (String) cfg.getOrDefault("server_name", "");
-            @SuppressWarnings("unchecked")
-            List<Object> ports = (List<Object>) cfg.get("ports");
-            vs.ports = ports.stream().mapToInt(o -> ((Number) o).intValue()).toArray();
-            @SuppressWarnings("unchecked")
-            Map<String, Object> eps = (Map<String, Object>) cfg.get("error_pages");
-            if (eps != null) eps.forEach((k, v) -> vs.errorPages.put(Integer.parseInt(k), (String) v));
-            if (cfg.containsKey("client_body_limit"))
-                vs.clientBodyLimit = ((Number) cfg.get("client_body_limit")).longValue();
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> rs = (List<Map<String, Object>>) cfg.get("routes");
-            if (rs != null) for (Map<String, Object> rc : rs) {
-                Route r = new Route();
-                r.path = (String) rc.get("path");
+        for (int idx = 0; idx < configs.size(); idx++) {
+            Map<String, Object> cfg = configs.get(idx);
+            try {
+                VirtualServer vs = new VirtualServer();
+                vs.host = (String) cfg.getOrDefault("host", "127.0.0.1");
+                vs.serverName = (String) cfg.getOrDefault("server_name", "");
+
+                // --- Validate ports ---
                 @SuppressWarnings("unchecked")
-                List<String> ms = (List<String>) rc.get("methods");
-                r.methods = ms != null ? new LinkedHashSet<>(ms) : new LinkedHashSet<>(List.of("GET"));
-                r.root = (String) rc.get("root");
-                r.defaultFile = (String) rc.get("default_file");
-                r.redirect = (String) rc.get("redirect");
-                r.directoryListing = Boolean.TRUE.equals(rc.get("directory_listing"));
+                List<Object> ports = (List<Object>) cfg.get("ports");
+                if (ports == null || ports.isEmpty()) {
+                    throw new IllegalArgumentException("No ports configured");
+                }
+                vs.ports = ports.stream().mapToInt(o -> ((Number) o).intValue()).toArray();
+
+                Set<Integer> seenPorts = new HashSet<>();
+                for (int port : vs.ports) {
+                    if (port < 1 || port > 65535) {
+                        throw new IllegalArgumentException(
+                            "Invalid port " + port + ". Port must be between 1 and 65535.");
+                    }
+                    if (!seenPorts.add(port)) {
+                        throw new IllegalArgumentException(
+                            "Duplicate port " + port + ". Each port must appear only once per server block.");
+                    }
+                }
+
+                // --- Error pages ---
                 @SuppressWarnings("unchecked")
-                List<String> cg = (List<String>) rc.get("cgi_extensions");
-                r.cgiExtensions = cg != null ? new HashSet<>(cg) : new HashSet<>();
-                r.clientBodyLimit = rc.containsKey("client_body_limit")
-                        ? ((Number) rc.get("client_body_limit")).longValue()
-                        : vs.clientBodyLimit;
-                vs.routes.add(r);
+                Map<String, Object> eps = (Map<String, Object>) cfg.get("error_pages");
+                if (eps != null) eps.forEach((k, v) -> vs.errorPages.put(Integer.parseInt(k), (String) v));
+
+                // --- Client body limit ---
+                if (cfg.containsKey("client_body_limit"))
+                    vs.clientBodyLimit = ((Number) cfg.get("client_body_limit")).longValue();
+
+                // --- Routes ---
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> rs = (List<Map<String, Object>>) cfg.get("routes");
+                if (rs == null || rs.isEmpty()) {
+                    throw new IllegalArgumentException("No routes configured");
+                }
+                for (Map<String, Object> rc : rs) {
+                    Route r = new Route();
+                    r.path = (String) rc.get("path");
+                    if (r.path == null || r.path.isEmpty()) {
+                        throw new IllegalArgumentException("Route missing 'path' field");
+                    }
+                    @SuppressWarnings("unchecked")
+                    List<String> ms = (List<String>) rc.get("methods");
+                    r.methods = ms != null ? new LinkedHashSet<>(ms) : new LinkedHashSet<>(List.of("GET"));
+                    r.root = (String) rc.get("root");
+                    r.defaultFile = (String) rc.get("default_file");
+                    r.redirect = (String) rc.get("redirect");
+                    r.directoryListing = Boolean.TRUE.equals(rc.get("directory_listing"));
+                    @SuppressWarnings("unchecked")
+                    List<String> cg = (List<String>) rc.get("cgi_extensions");
+                    r.cgiExtensions = cg != null ? new HashSet<>(cg) : new HashSet<>();
+                    r.clientBodyLimit = rc.containsKey("client_body_limit")
+                            ? ((Number) rc.get("client_body_limit")).longValue()
+                            : vs.clientBodyLimit;
+                    vs.routes.add(r);
+                }
+                list.add(vs);
+                System.out.println("Loaded server '" + vs.serverName + "' on ports "
+                        + Arrays.toString(vs.ports));
+            } catch (Exception e) {
+                String name = cfg.containsKey("server_name") ? (String) cfg.get("server_name") : "server #" + (idx + 1);
+                System.err.println("Warning: skipping server '" + name
+                        + "' due to configuration error: " + e.getMessage());
             }
-            list.add(vs);
+        }
+        if (list.isEmpty()) {
+            throw new IllegalArgumentException(
+                "No valid server configurations found. All server blocks had errors.");
+
         }
         return list;
     }
@@ -138,7 +181,7 @@ public class Server {
                 System.err.println("Failed to bind port " + e.getKey() + " - " + ex.getMessage());
             }
         }
-
+    
         while (true) {
             selector.select(100);
 
