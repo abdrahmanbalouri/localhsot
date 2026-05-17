@@ -5,6 +5,7 @@ import java.nio.channels.*;
 import java.nio.charset.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class Server {
     private static final int MAX_HEADER_BYTES = 64 * 1024;
@@ -132,6 +133,7 @@ public class Server {
                 ssc.configureBlocking(false);
                 ssc.bind(new InetSocketAddress(e.getKey()));
                 ssc.register(selector, SelectionKey.OP_ACCEPT, e.getValue());
+                System.out.println("Server running on port " + e.getKey() + " Host: " + e.getValue().stream().map(vs -> vs.serverName).collect(Collectors.joining(", ")));
             } catch (Exception ex) {
                 System.err.println("Failed to bind port " + e.getKey() + " - " + ex.getMessage());
             }
